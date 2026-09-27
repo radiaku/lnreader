@@ -1,0 +1,245 @@
+name: Fork Release
+run-name: Fork release check${{ inputs.force && ' (forced rebuild)' || '' }}
+
+# Tracks upstream lnreader/lnreader releases. When upstream publishes a new
+# release and our upstream PR is still open, this re-applies the commits on
+# the `fork/patches` branch on top of the upstream release tag, builds the
+# release APKs exactly like upstream's release workflow, and publishes them
+# as a release on this fork under the same tag.
+#
+# The in-app updater on `fork/patches` points at this repo's releases, so
+# installed fork builds pick these up automatically.
+
+on:
+  schedule:
+    # Mondays 02:00 UTC. The check is cheap; a build only runs when upstream
+    # has a release we have not built yet.
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this fork already has a release for the latest upstream tag
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CI: 'true'
+  EXPO_NO_TELEMETRY: '1'
+  NODE_ENV: 'production'
+  UPSTREAM_REPO: lnreader/lnreader
+  UPSTREAM_PR: '1990'
+  PATCH_BRANCH: fork/patches
+
+jobs:
+  check:
+    name: Check Upstream
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      upstream_url: ${{ steps.decide.outputs.upstream_url }}
+
+    steps:
+      - name: Decide Whether To Build
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          PR_STATE="$(gh pr view "$UPSTREAM_PR" --repo "$UPSTREAM_REPO" --json state -q .state)"
+          echo "Upstream PR #$UPSTREAM_PR state: $PR_STATE"
+
+          if [ "$PR_STATE" = "MERGED" ]; then
+            echo "::notice title=Upstream PR merged::PR #$UPSTREAM_PR is merged upstream. The fork is no longer needed; disable this workflow and install the official release."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_JSON="$(gh api "repos/$UPSTREAM_REPO/releases/latest")"
+          TAG="$(jq -r .tag_name <<<"$RELEASE_JSON")"
+          UPSTREAM_URL="$(jq -r .html_url <<<"$RELEASE_JSON")"
+          VERSION="${TAG#v}"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected upstream release tag '$TAG'"
+            exit 1
+          fi
+
+          echo "Latest upstream release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_url=$UPSTREAM_URL" >> "$GITHUB_OUTPUT"
+
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice title=Up to date::This fork already has a release for $TAG."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice title=Building::No fork release for $TAG yet; building."
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ needs.check.outputs.tag }}
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: ${{ needs.check.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.check.outputs.version }}
+      UPSTREAM_RELEASE_URL: ${{ needs.check.outputs.upstream_url }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply Fork Patches Onto Upstream Release
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream master "+refs/tags/$RELEASE_TAG:refs/tags/upstream/$RELEASE_TAG"
+          git fetch origin "$PATCH_BRANCH"
+
+          BASE="$(git merge-base "origin/$PATCH_BRANCH" upstream/master)"
+          PATCHES="$(git rev-list --reverse "$BASE..origin/$PATCH_BRANCH")"
+
+          if [ -z "$PATCHES" ]; then
+            echo "::error::No fork commits found on $PATCH_BRANCH"
+            exit 1
+          fi
+
+          echo "Fork commits to apply:"
+          git log --oneline --no-walk $PATCHES
+
+          git checkout --detach "refs/tags/upstream/$RELEASE_TAG"
+
+          if ! git cherry-pick $PATCHES; then
+            echo "::error title=Patch conflict::Fork patches no longer apply cleanly onto $RELEASE_TAG. Rebase $PATCH_BRANCH manually and re-run."
+            git status
+            git diff
+            exit 1
+          fi
+
+          {
+            echo "## Fork build of upstream [LNReader $RELEASE_TAG]($UPSTREAM_RELEASE_URL)"
+            echo
+            echo "Upstream release plus the following fork commits (upstream PR: https://github.com/$UPSTREAM_REPO/pull/$UPSTREAM_PR):"
+            echo
+            git log --format='- %s (%h)' --no-walk $PATCHES
+            echo
+            echo "Same signing certificate as the official APK, so it installs over an existing install and keeps your data."
+          } > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Set Up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set Up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Configure Release Environment
+        env:
+          MYANIMELIST_CLIENT_ID: ${{ vars.MYANIMELIST_CLIENT_ID }}
+          ANILIST_CLIENT_ID: ${{ vars.ANILIST_CLIENT_ID }}
+        run: |
+          pnpm generate:env:release \
+            --build-type "Fork Release" \
+            --node-env "production" \
+            --myanimelist-client-id "$MYANIMELIST_CLIENT_ID" \
+            --anilist-client-id "$ANILIST_CLIENT_ID"
+
+      - name: Generate Native Android Project
+        run: |
+          pnpm exec expo prebuild \
+            --platform android \
+            --clean \
+            --no-install \
+            --non-interactive
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: enhanced
+          cache-cleanup: on-success
+          add-job-summary: always
+
+      - name: Build Release APKs
+        working-directory: android
+        run: |
+          mkdir -p app/build/intermediates/sourcemaps/react/release
+
+          ./gradlew :app:assembleRelease \
+            --build-cache \
+            --parallel \
+            -PreleaseAbiSplits=true \
+            --stacktrace
+
+      - name: Package Release APKs
+        run: pnpm release:package "$RELEASE_VERSION"
+
+      - name: Verify APK Signatures
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner |
+            sort -V |
+            tail -1)"
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "Android apksigner was not found"
+            exit 1
+          fi
+
+          for APK in release-artifacts/*.apk; do
+            "$APKSIGNER" verify --print-certs "$APK" | grep -i 'SHA-256' || true
+            "$APKSIGNER" verify "$APK"
+          done
+
+      - name: Push Release Tag
+        run: |
+          git tag -f "$RELEASE_TAG"
+          git push --force origin "refs/tags/$RELEASE_TAG"
+
+      - name: Publish Fork Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Replacing existing fork release $RELEASE_TAG"
+            gh release delete "$RELEASE_TAG" --yes
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            release-artifacts/* \
+            --title "LNReader $RELEASE_TAG (fork)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --latest
