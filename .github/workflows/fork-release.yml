@@ -233,12 +233,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          # Always name the repo: the checkout has an `upstream` remote, and
+          # gh would otherwise resolve to the parent repository.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Replacing existing fork release $RELEASE_TAG"
-            gh release delete "$RELEASE_TAG" --yes
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes
           fi
 
           gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             release-artifacts/* \
             --title "LNReader $RELEASE_TAG (fork)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
