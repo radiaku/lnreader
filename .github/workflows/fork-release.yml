@@ -172,12 +172,12 @@ jobs:
         env:
           MYANIMELIST_CLIENT_ID: ${{ vars.MYANIMELIST_CLIENT_ID }}
           ANILIST_CLIENT_ID: ${{ vars.ANILIST_CLIENT_ID }}
+        # Client IDs are read from the environment; passing them as empty
+        # arguments makes the script fail, and this fork may not have them.
         run: |
-          pnpm generate:env:release \
+          node scripts/generate-env-file.cjs \
             --build-type "Fork Release" \
-            --node-env "production" \
-            --myanimelist-client-id "$MYANIMELIST_CLIENT_ID" \
-            --anilist-client-id "$ANILIST_CLIENT_ID"
+            --node-env "production"
 
       - name: Generate Native Android Project
         run: |
