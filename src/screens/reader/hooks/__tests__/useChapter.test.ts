@@ -41,6 +41,11 @@ jest.mock('@hooks', () => ({
   useFullscreenMode: () => mockUseFullscreenMode(),
 }));
 
+let mockIsFocused = true;
+jest.mock('@react-navigation/native', () => ({
+  useIsFocused: () => mockIsFocused,
+}));
+
 jest.mock('@database/queries/ChapterQueries', () => ({
   getChapter: (...args: unknown[]) => mockGetDbChapter(...args),
   getChapterCount: (...args: unknown[]) => mockGetChapterCount(...args),
@@ -161,6 +166,7 @@ describe('useChapter', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockIsFocused = true;
     (NativeFile.exists as jest.Mock).mockReturnValue(false);
     // The native module rejects when the chapter is not downloaded.
     (NativeFile.readFile as jest.Mock).mockRejectedValue(
@@ -428,7 +434,257 @@ describe('useChapter', () => {
     expect(result.current.chapterText).toBe('SANITIZED:next body');
   });
 
-  it('injects scripts supporting paged and normal modes when volume buttons are pressed', async () => {
+  it('does not publish a chapter when a pending navigation is cancelled', async () => {
+    const store = createStore();
+    const deferredNext = createDeferred<string>();
+    mockUseNovelActions.mockReturnValue(store.state);
+    mockGetNextChapter.mockImplementation(
+      async (_novelId: number, position: number) =>
+        position === initialChapter.position ? nextChapter : undefined,
+    );
+    mockFetchChapter.mockImplementation(
+      async (_pluginId: string, path: string) =>
+        path === nextChapter.path ? deferredNext.promise : 'initial body',
+    );
+
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
+    await waitFor(() =>
+      expect(result.current.nextChapter).toEqual(nextChapter),
+    );
+
+    let active = true;
+    const navigation = result.current.navigateChapter('NEXT', () => active);
+    active = false;
+
+    await act(async () => {
+      deferredNext.resolve('next body');
+      await navigation;
+    });
+
+    expect(result.current.chapter.id).toBe(initialChapter.id);
+    expect(result.current.chapterText).toBe('SANITIZED:initial body');
+  });
+
+  describe('infinite scrolling', () => {
+    const thirdChapter = makeChapter(3, '1');
+
+    beforeEach(() => {
+      const following: Record<number, ReturnType<typeof makeChapter>> = {
+        [initialChapter.position]: nextChapter,
+        [nextChapter.position]: thirdChapter,
+      };
+      mockGetNextChapter.mockImplementation(
+        async (_novelId: number, position: number) => following[position],
+      );
+      mockFetchChapter.mockImplementation(
+        async (_pluginId: string, path: string) => `body of ${path}`,
+      );
+    });
+
+    it('appends the following chapters and makes them current without rebuilding the document', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await expect(
+        result.current.loadChapterAfter(initialChapter.id),
+      ).resolves.toEqual({
+        chapter: nextChapter,
+        html: `SANITIZED:body of ${nextChapter.path}`,
+      });
+
+      act(() => result.current.activateChapter(nextChapter.id));
+
+      expect(result.current.chapter).toEqual(nextChapter);
+      expect(result.current.documentChapter).toEqual(initialChapter);
+      expect(result.current.chapterText).toBe(
+        `SANITIZED:body of ${initialChapter.path}`,
+      );
+      // The header and footer navigation follow the chapter being read.
+      await waitFor(() =>
+        expect(result.current.nextChapter).toEqual(thirdChapter),
+      );
+
+      await expect(
+        result.current.loadChapterAfter(nextChapter.id),
+      ).resolves.toMatchObject({ chapter: thirdChapter });
+      await expect(
+        result.current.loadChapterAfter(thirdChapter.id),
+      ).resolves.toBeNull();
+    });
+
+    it('rebuilds the document from the chapter being read at its live progress', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.getRebuildTarget()).toEqual({
+        chapter: initialChapter,
+        html: `SANITIZED:body of ${initialChapter.path}`,
+      });
+
+      await act(async () => {
+        await result.current.loadChapterAfter(initialChapter.id);
+      });
+      act(() => {
+        result.current.saveProgress(100, initialChapter.id);
+        result.current.activateChapter(nextChapter.id);
+        result.current.saveProgress(40, nextChapter.id);
+      });
+
+      expect(result.current.getRebuildTarget()).toEqual({
+        chapter: { ...nextChapter, progress: 40 },
+        html: `SANITIZED:body of ${nextChapter.path}`,
+      });
+    });
+
+    it('rebuilds at the latest position after scrolling back', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      await act(async () => {
+        await result.current.loadChapterAfter(initialChapter.id);
+      });
+      act(() => {
+        result.current.activateChapter(nextChapter.id);
+        result.current.saveProgress(80, nextChapter.id);
+        result.current.saveProgress(30, nextChapter.id);
+      });
+
+      expect(result.current.getRebuildTarget()?.chapter.progress).toBe(30);
+    });
+
+    it('keeps the position for rebuilds in incognito mode without saving it', async () => {
+      mockUseLibrarySettings.mockReturnValue({ incognitoMode: true });
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      await act(async () => {
+        await result.current.loadChapterAfter(initialChapter.id);
+      });
+      act(() => {
+        result.current.saveProgress(100, initialChapter.id);
+        result.current.activateChapter(nextChapter.id);
+        result.current.saveProgress(40, nextChapter.id);
+      });
+
+      expect(result.current.getRebuildTarget()?.chapter).toEqual({
+        ...nextChapter,
+        progress: 40,
+      });
+      expect(store.state.updateChapterProgress).not.toHaveBeenCalled();
+      expect(store.state.markChapterRead).not.toHaveBeenCalled();
+    });
+
+    it('pulls in the next source page when the last loaded chapter ends its page', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+      const nextPageChapter = makeChapter(4, '2');
+      mockGetNextChapter.mockResolvedValue(undefined);
+      mockGetChapterCount.mockResolvedValue(0);
+      mockFetchPage.mockImplementation(async () => {
+        mockGetNextChapter.mockResolvedValue(nextPageChapter);
+        return { chapters: [{ name: nextPageChapter.name }] };
+      });
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await expect(
+        result.current.loadChapterAfter(initialChapter.id),
+      ).resolves.toMatchObject({ chapter: nextPageChapter });
+      expect(mockFetchPage).toHaveBeenCalledWith(
+        novel.pluginId,
+        novel.path,
+        '2',
+      );
+    });
+
+    it('rejects when the next source page cannot be fetched so the reader can offer a retry', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+      mockGetNextChapter.mockResolvedValue(undefined);
+      mockGetChapterCount.mockResolvedValue(0);
+      mockFetchPage.mockRejectedValue(new Error('offline'));
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await expect(
+        result.current.loadChapterAfter(initialChapter.id),
+      ).rejects.toThrow('offline');
+      expect(mockInsertChapters).not.toHaveBeenCalled();
+    });
+
+    it('drops progress the page reports for a chapter navigated away from', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() =>
+        expect(result.current.nextChapter).toEqual(nextChapter),
+      );
+      await act(async () => {
+        await result.current.navigateChapter('NEXT');
+      });
+      expect(result.current.documentChapter).toEqual(nextChapter);
+
+      act(() => {
+        // The page outlives a chapter, so a late save of the previous one can
+        // still arrive after the next one was swapped in.
+        result.current.saveProgress(90, initialChapter.id);
+        result.current.saveProgress(20, nextChapter.id);
+      });
+
+      expect(store.state.updateChapterProgress).not.toHaveBeenCalledWith(
+        initialChapter.id,
+        90,
+      );
+      expect(store.state.updateChapterProgress).toHaveBeenCalledWith(
+        nextChapter.id,
+        20,
+      );
+    });
+
+    it('saves progress and marks read the chapter the reader reports, not the current one', async () => {
+      const store = createStore();
+      mockUseNovelActions.mockReturnValue(store.state);
+
+      const { result } = renderHook(() => useFlatChapter(initialChapter));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      await act(async () => {
+        await result.current.loadChapterAfter(initialChapter.id);
+      });
+
+      act(() => {
+        result.current.saveProgress(100, nextChapter.id);
+        // A late report from a document that has since been replaced.
+        result.current.saveProgress(100, 99);
+        result.current.activateChapter(99);
+      });
+
+      expect(store.state.updateChapterProgress).toHaveBeenCalledTimes(1);
+      expect(store.state.updateChapterProgress).toHaveBeenCalledWith(
+        nextChapter.id,
+        100,
+      );
+      expect(store.state.markChapterRead).toHaveBeenCalledWith(nextChapter.id);
+      expect(mockParseChapterNumber).toHaveBeenCalledWith(
+        novel.name,
+        nextChapter.name,
+      );
+      expect(result.current.chapter).toEqual(initialChapter);
+    });
+  });
+
+  it('handles volume and Page Up/Down keys in paged and scrolling modes', async () => {
     const store = createStore();
     mockUseNovelActions.mockReturnValue(store.state);
     const mockInjectJavaScript = jest.fn();
@@ -451,9 +707,17 @@ describe('useChapter', () => {
     const volumeDownCall = (
       NativeVolumeButtonListener.addListener as jest.Mock
     ).mock.calls.find(([event]) => event === 'VolumeDown');
+    const pageUpCall = (
+      NativeVolumeButtonListener.addListener as jest.Mock
+    ).mock.calls.find(([event]) => event === 'PageUp');
+    const pageDownCall = (
+      NativeVolumeButtonListener.addListener as jest.Mock
+    ).mock.calls.find(([event]) => event === 'PageDown');
 
     expect(volumeUpCall).toBeDefined();
     expect(volumeDownCall).toBeDefined();
+    expect(pageUpCall).toBeDefined();
+    expect(pageDownCall).toBeDefined();
 
     // Trigger VolumeUp callback
     volumeUpCall[1]();
@@ -466,6 +730,15 @@ describe('useChapter', () => {
       expect.stringContaining('window.scrollBy'),
     );
 
+    pageUpCall[1]();
+    expect(mockInjectJavaScript).toHaveBeenLastCalledWith(
+      expect.stringContaining('window.scrollBy({top: -100,'),
+    );
+    pageDownCall[1]();
+    expect(mockInjectJavaScript).toHaveBeenLastCalledWith(
+      expect.stringContaining('window.scrollBy({top: 100,'),
+    );
+
     // Trigger VolumeDown callback
     volumeDownCall[1]();
     expect(mockInjectJavaScript).toHaveBeenCalledWith(
@@ -476,6 +749,88 @@ describe('useChapter', () => {
     expect(mockInjectJavaScript).toHaveBeenCalledWith(
       expect.stringContaining('window.scrollBy'),
     );
+  });
+
+  it('leaves the volume buttons to the reader in front', async () => {
+    mockUseNovelActions.mockReturnValue(createStore().state);
+    mockUseChapterGeneralSettings.mockReturnValue({
+      ...mockUseChapterGeneralSettings(),
+      useVolumeButtons: true,
+    });
+    const setActive = NativeVolumeButtonListener.setActive as jest.Mock;
+    const mockInjectJavaScript = jest.fn();
+    const { result: firstReader, rerender: rerenderFirst } = renderHook(() =>
+      useChapter(
+        { current: { injectJavaScript: mockInjectJavaScript } as any },
+        initialChapter,
+        novel,
+      ),
+    );
+    await waitFor(() =>
+      expect(firstReader.current.chapterContext.loading).toBe(false),
+    );
+    expect(setActive).toHaveBeenLastCalledWith(true);
+    const volumeUp = (
+      NativeVolumeButtonListener.addListener as jest.Mock
+    ).mock.calls.find(([event]) => event === 'VolumeUp')[1];
+
+    // A novel link covers the first reader, and the linked novel opens a
+    // chapter in a second reader.
+    mockIsFocused = false;
+    rerenderFirst({});
+    expect(setActive).toHaveBeenLastCalledWith(false);
+    mockIsFocused = true;
+    const { result: secondReader, unmount: closeSecond } = renderHook(() =>
+      useChapter({ current: null }, nextChapter, novel),
+    );
+    await waitFor(() =>
+      expect(secondReader.current.chapterContext.loading).toBe(false),
+    );
+
+    volumeUp();
+    expect(mockInjectJavaScript).not.toHaveBeenCalledWith(
+      expect.stringContaining('window.scrollBy'),
+    );
+
+    // Back focuses the first reader before the second one unmounts.
+    rerenderFirst({});
+    closeSecond();
+    expect(setActive).toHaveBeenLastCalledWith(true);
+  });
+
+  it('stops auto-scrolling while another screen covers the reader', async () => {
+    jest.useFakeTimers();
+    try {
+      mockUseNovelActions.mockReturnValue(createStore().state);
+      mockUseChapterGeneralSettings.mockReturnValue({
+        ...mockUseChapterGeneralSettings(),
+        autoScroll: true,
+      });
+      const mockInjectJavaScript = jest.fn();
+      const { result, rerender } = renderHook(() =>
+        useChapter(
+          { current: { injectJavaScript: mockInjectJavaScript } as any },
+          initialChapter,
+          novel,
+        ),
+      );
+      await waitFor(() =>
+        expect(result.current.chapterContext.loading).toBe(false),
+      );
+      act(() => jest.advanceTimersByTime(1000));
+      expect(mockInjectJavaScript).toHaveBeenCalledWith(
+        expect.stringContaining('window.scrollBy'),
+      );
+
+      mockIsFocused = false;
+      rerender({});
+      mockInjectJavaScript.mockClear();
+      act(() => jest.advanceTimersByTime(3000));
+
+      expect(mockInjectJavaScript).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('inverts volume button directions in paged mode when pageReaderInvertVolumeButtons is enabled', async () => {
@@ -511,9 +866,17 @@ describe('useChapter', () => {
     const volumeDownCall = (
       NativeVolumeButtonListener.addListener as jest.Mock
     ).mock.calls.find(([event]) => event === 'VolumeDown');
+    const pageUpCall = (
+      NativeVolumeButtonListener.addListener as jest.Mock
+    ).mock.calls.find(([event]) => event === 'PageUp');
+    const pageDownCall = (
+      NativeVolumeButtonListener.addListener as jest.Mock
+    ).mock.calls.find(([event]) => event === 'PageDown');
 
     expect(volumeUpCall).toBeDefined();
     expect(volumeDownCall).toBeDefined();
+    expect(pageUpCall).toBeDefined();
+    expect(pageDownCall).toBeDefined();
 
     // VolumeUp callback should move +1 (forward) when inverted
     volumeUpCall[1]();
@@ -528,6 +891,19 @@ describe('useChapter', () => {
     expect(mockInjectJavaScript).toHaveBeenCalledWith(
       expect.stringContaining(
         'window.pageReader.movePage((window.pageReader.page?.val ?? 0) - 1)',
+      ),
+    );
+
+    pageUpCall[1]();
+    expect(mockInjectJavaScript).toHaveBeenLastCalledWith(
+      expect.stringContaining(
+        'window.pageReader.movePage((window.pageReader.page?.val ?? 0) - 1)',
+      ),
+    );
+    pageDownCall[1]();
+    expect(mockInjectJavaScript).toHaveBeenLastCalledWith(
+      expect.stringContaining(
+        'window.pageReader.movePage((window.pageReader.page?.val ?? 0) + 1)',
       ),
     );
   });

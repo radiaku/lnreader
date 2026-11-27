@@ -148,10 +148,6 @@ jest.mock('react-native-safe-area-context', () => {
   };
 });
 
-jest.mock('@gorhom/bottom-sheet', () => ({
-  BottomSheetModalProvider: ({ children }: { children: ReactNode }) => children,
-}));
-
 jest.mock('@screens/novel/NovelContext', () => ({
   NovelContextProvider: ({ children }: { children: ReactNode }) => children,
 }));
@@ -162,6 +158,10 @@ jest.mock('@i18n/translations', () => ({
 
 jest.mock('@utils/showToast', () => ({
   showToast: jest.fn(),
+}));
+
+jest.mock('@services/backgroundTasks', () => ({
+  backgroundTasks: { enqueue: jest.fn() },
 }));
 
 jest.mock('../hooks/useGlobalSearch', () => ({

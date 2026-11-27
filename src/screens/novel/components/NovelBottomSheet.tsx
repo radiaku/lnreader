@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useMemo } from 'react';
+import React, { useCallback, useState, useMemo, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -7,25 +7,30 @@ import {
   Pressable,
   ScrollView,
   Modal as RNModal,
+  type ScrollViewInstance,
 } from 'react-native';
 import MaterialCommunityIcons from '@react-native-vector-icons/material-design-icons';
 import color from 'color';
 
-import { TabView, TabViewProps } from 'react-native-tab-view';
-import { BottomSheetView, BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import BottomSheet from '@components/BottomSheet/BottomSheet';
+import { TabViewProps } from 'react-native-tab-view';
+import SheetTabView from '@components/BottomSheet/SheetTabView';
+import BottomSheet, {
+  BottomSheetRef,
+} from '@components/BottomSheet/BottomSheet';
 import { getString } from '@i18n/translations';
 
 import { Checkbox, SortItem } from '@components/Checkbox/Checkbox';
 import { Button, TopTabBar } from '@components';
 
-import { BottomSheetModalMethods } from '@gorhom/bottom-sheet/lib/typescript/types';
 import { ThemeColors } from '@theme/types';
 import { useNovelSettings } from '@hooks/persisted/useNovelSettings';
+import { useAppSettings } from '@hooks/persisted';
 import { useNovelValue } from '@screens/novel/NovelContext';
 
+const SNAP_POINTS = [290];
+
 interface ChaptersSettingsSheetProps {
-  bottomSheetRef: React.RefObject<BottomSheetModalMethods | null>;
+  bottomSheetRef: React.RefObject<BottomSheetRef | null>;
   theme: ThemeColors;
 }
 
@@ -38,6 +43,7 @@ const ChaptersSettingsSheet = ({
   bottomSheetRef,
   theme,
 }: ChaptersSettingsSheetProps) => {
+  const { reduceAppAnimations = false } = useAppSettings();
   const {
     setChapterSort,
     getChapterFilterState,
@@ -78,9 +84,11 @@ const ChaptersSettingsSheet = ({
       ? 'indeterminate'
       : false;
 
+  const filtersScrollRef = useRef<ScrollViewInstance>(null);
+
   const renderFilters = useCallback(
     () => (
-      <BottomSheetScrollView style={styles.flex}>
+      <ScrollView ref={filtersScrollRef} style={styles.flex}>
         <Checkbox
           theme={theme}
           label={getString('novelScreen.bottomSheet.filters.downloaded')}
@@ -140,7 +148,7 @@ const ChaptersSettingsSheet = ({
             </Pressable>
           </View>
         )}
-      </BottomSheetScrollView>
+      </ScrollView>
     ),
     [
       cycleChapterFilter,
@@ -262,9 +270,14 @@ const ChaptersSettingsSheet = ({
   );
   return (
     <>
-      <BottomSheet snapPoints={[290]} bottomSheetRef={bottomSheetRef}>
-        <BottomSheetView style={styles.contentContainer}>
-          <TabView
+      <BottomSheet
+        snapPoints={SNAP_POINTS}
+        bottomSheetRef={bottomSheetRef}
+        scrollableRef={filtersScrollRef}
+      >
+        <View style={styles.contentContainer}>
+          <SheetTabView
+            animationEnabled={!reduceAppAnimations}
             commonOptions={{
               label: renderLabel,
             }}
@@ -275,13 +288,13 @@ const ChaptersSettingsSheet = ({
             initialLayout={{ width: layout.width }}
             style={styles.tabView}
           />
-        </BottomSheetView>
+        </View>
       </BottomSheet>
       {scanlators.length > 0 && (
         <RNModal
           visible={scanlatorsModalVisible}
           transparent={true}
-          animationType="fade"
+          animationType={reduceAppAnimations ? 'none' : 'fade'}
           onRequestClose={() => setScanlatorsModalVisible(false)}
         >
           <View style={styles.modalBackdrop}>

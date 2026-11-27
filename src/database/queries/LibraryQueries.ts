@@ -9,7 +9,12 @@ import {
   exists,
   notExists,
   isNotNull,
+  isNull,
   ne,
+  gte,
+  lt,
+  asc,
+  SQL,
 } from 'drizzle-orm';
 import { dbManager } from '@database/db';
 import { novelSchema, novelCategorySchema } from '@database/schema';
@@ -18,6 +23,11 @@ import type {
   GlobalUpdateCategoryFilters,
   SmartUpdateFilters,
 } from '@hooks/persisted/useSettings';
+import { NovelStatus } from '@plugins/types';
+import type {
+  LibraryFilterKey,
+  LibraryFilters,
+} from '@screens/library/constants/constants';
 
 const smartUpdateConditions = ({
   skipCompleted,
@@ -31,12 +41,43 @@ const smartUpdateConditions = ({
   skipCompleted ? ne(novelSchema.status, 'Completed') : undefined,
 ];
 
+const isDownloaded = () =>
+  or(
+    gt(novelSchema.chaptersDownloaded, castInt(0)),
+    eq(novelSchema.isLocal, true),
+  );
+
+const libraryFilterConditions: Record<LibraryFilterKey, () => SQL | undefined> =
+  {
+    downloaded: isDownloaded,
+    unread: () => isNull(novelSchema.lastReadAt),
+    started: () => isNotNull(novelSchema.lastReadAt),
+    completed: () => like(novelSchema.status, 'Completed'),
+    customUpdateFrequency: () => lt(novelSchema.fetchInterval, castInt(0)),
+  };
+
+/** Every set filter must hold; an excluded one matches what it would not. */
+const libraryFiltersConditions = (
+  filters: LibraryFilters,
+  downloadedOnlyMode?: boolean,
+) =>
+  (Object.keys(libraryFilterConditions) as LibraryFilterKey[]).map(key => {
+    const state = filters[key];
+    // Downloaded-only mode already includes downloaded novels.
+    if (!state || (key === 'downloaded' && downloadedOnlyMode)) {
+      return undefined;
+    }
+    const condition = libraryFilterConditions[key]();
+    // A NULL column fails both a condition and its NOT, so treat it as false.
+    return state === 'exclude' ? sql`NOT COALESCE(${condition}, 0)` : condition;
+  });
+
 /**
  * Get library novels with optional filtering and sorting using Drizzle ORM
  */
 export const getLibraryNovelsQuery = (
   sortOrder?: string,
-  filter?: string,
+  filters: LibraryFilters = {},
   searchText?: string,
   downloadedOnlyMode?: boolean,
   excludeLocalNovels?: boolean,
@@ -48,13 +89,8 @@ export const getLibraryNovelsQuery = (
       and(
         eq(novelSchema.inLibrary, true),
         excludeLocalNovels ? eq(novelSchema.isLocal, false) : undefined,
-        filter ? sql.raw(filter) : undefined,
-        downloadedOnlyMode
-          ? or(
-              gt(novelSchema.chaptersDownloaded, castInt(0)),
-              eq(novelSchema.isLocal, true),
-            )
-          : undefined,
+        ...libraryFiltersConditions(filters, downloadedOnlyMode),
+        downloadedOnlyMode ? isDownloaded() : undefined,
         searchText ? like(novelSchema.name, `%${searchText}%`) : undefined,
       ),
     )
@@ -73,18 +109,50 @@ export const getLibraryNovelsQuery = (
 
 export const getLibraryNovelsFromDb = (
   sortOrder?: string,
-  filter?: string,
+  filters?: LibraryFilters,
   searchText?: string,
   downloadedOnlyMode?: boolean,
   excludeLocalNovels?: boolean,
 ) =>
   getLibraryNovelsQuery(
     sortOrder,
-    filter,
+    filters,
     searchText,
     downloadedOnlyMode,
     excludeLocalNovels,
   ).all();
+
+export const getLibraryNovelKeysQuery = () =>
+  dbManager
+    .select({ pluginId: novelSchema.pluginId, path: novelSchema.path })
+    .from(novelSchema)
+    .where(eq(novelSchema.inLibrary, true));
+
+export const getLibraryNovelKeysFromDb = () => getLibraryNovelKeysQuery().all();
+
+const inCategories = (categoryIds: number[]) =>
+  dbManager
+    .select({ novelId: novelCategorySchema.novelId })
+    .from(novelCategorySchema)
+    .where(
+      and(
+        eq(novelCategorySchema.novelId, novelSchema.id),
+        inArray(novelCategorySchema.categoryId, categoryIds),
+      ),
+    );
+
+/** An empty include list means all categories, while exclusions always win. */
+const categoryConditions = ({
+  includedCategoryIds,
+  excludedCategoryIds,
+}: GlobalUpdateCategoryFilters) => [
+  includedCategoryIds.length
+    ? exists(inCategories(includedCategoryIds))
+    : undefined,
+  excludedCategoryIds.length
+    ? notExists(inCategories(excludedCategoryIds))
+    : undefined,
+];
 
 /**
  * Get the novels eligible for a global update in one query.
@@ -98,29 +166,6 @@ export const getLibraryNovelsForGlobalUpdate = (
     skipWithUnread: false,
   },
 ) => {
-  const includedNovel = includedCategoryIds.length
-    ? dbManager
-        .select({ novelId: novelCategorySchema.novelId })
-        .from(novelCategorySchema)
-        .where(
-          and(
-            eq(novelCategorySchema.novelId, novelSchema.id),
-            inArray(novelCategorySchema.categoryId, includedCategoryIds),
-          ),
-        )
-    : undefined;
-  const excludedNovel = excludedCategoryIds.length
-    ? dbManager
-        .select({ novelId: novelCategorySchema.novelId })
-        .from(novelCategorySchema)
-        .where(
-          and(
-            eq(novelCategorySchema.novelId, novelSchema.id),
-            inArray(novelCategorySchema.categoryId, excludedCategoryIds),
-          ),
-        )
-    : undefined;
-
   return dbManager
     .select()
     .from(novelSchema)
@@ -128,8 +173,7 @@ export const getLibraryNovelsForGlobalUpdate = (
       and(
         eq(novelSchema.inLibrary, true),
         eq(novelSchema.isLocal, false),
-        includedNovel ? exists(includedNovel) : undefined,
-        excludedNovel ? notExists(excludedNovel) : undefined,
+        ...categoryConditions({ includedCategoryIds, excludedCategoryIds }),
         ...smartUpdateConditions(smartUpdateFilters),
       ),
     )
@@ -176,3 +220,46 @@ export const getLibraryWithCategory = async (
 
   return result;
 };
+
+/** Plugins often report Unknown, so only statuses that can't release again are left out. */
+const UPCOMING_STATUSES: string[] = [
+  NovelStatus.Ongoing,
+  NovelStatus.Unknown,
+  NovelStatus.PublishingFinished,
+];
+
+/**
+ * Library novels predicted to update on or after [startOfToday], soonest first,
+ * for the Upcoming screen.
+ */
+export const getUpcomingNovelsQuery = (
+  categoryFilters: GlobalUpdateCategoryFilters,
+  startOfToday: string,
+) =>
+  dbManager
+    .select({
+      id: novelSchema.id,
+      name: novelSchema.name,
+      path: novelSchema.path,
+      pluginId: novelSchema.pluginId,
+      cover: novelSchema.cover,
+      nextUpdate: novelSchema.nextUpdate,
+    })
+    .from(novelSchema)
+    .where(
+      and(
+        eq(novelSchema.inLibrary, true),
+        eq(novelSchema.isLocal, false),
+        gte(novelSchema.nextUpdate, startOfToday),
+        or(
+          isNull(novelSchema.status),
+          inArray(novelSchema.status, UPCOMING_STATUSES),
+        ),
+        ...categoryConditions(categoryFilters),
+      ),
+    )
+    .orderBy(asc(novelSchema.nextUpdate), asc(novelSchema.name));
+
+export type UpcomingNovel = Awaited<
+  ReturnType<ReturnType<typeof getUpcomingNovelsQuery>['all']>
+>[number];

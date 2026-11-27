@@ -1,6 +1,7 @@
 jest.mock('@database/queries/NovelQueries', () => ({
   getNovelById: jest.fn(),
   getNovelByPath: jest.fn(),
+  getNovelByPathPrefix: jest.fn(),
   deleteCachedNovels: jest.fn(),
   getCachedNovels: jest.fn(),
   insertNovelAndChapters: jest.fn(),
@@ -28,6 +29,8 @@ jest.mock('@database/queries/ChapterQueries', () => ({
   deleteChapter: jest.fn(),
   deleteChapters: jest.fn(),
   getPageChapters: jest.fn(),
+  getChapter: jest.fn(),
+  getDownloadedChapterIds: jest.fn(async () => []),
   insertChapters: jest.fn(),
   getCustomPages: jest.fn(),
   getChapterCount: jest.fn(),
@@ -50,6 +53,8 @@ jest.mock('@database/queries/HistoryQueries', () => ({
 jest.mock('@database/queries/LibraryQueries', () => ({
   getLibraryNovelsFromDb: jest.fn(),
   getLibraryNovelsQuery: jest.fn(),
+  getLibraryNovelKeysFromDb: jest.fn(),
+  getLibraryNovelKeysQuery: jest.fn(),
   getLibraryWithCategory: jest.fn(),
 }));
 

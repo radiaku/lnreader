@@ -27,6 +27,7 @@ jest.mock('@hooks/persisted/useTheme', () => ({
 }));
 
 jest.mock('@hooks/persisted', () => ({
+  useAppSettings: () => ({ reduceAppAnimations: false }),
   useTheme: () => mockTheme,
 }));
 
@@ -79,10 +80,6 @@ jest.mock('react-native-safe-area-context', () => {
     useSafeAreaInsets: () => insets,
   };
 });
-
-jest.mock('@gorhom/bottom-sheet', () => ({
-  BottomSheetModalProvider: ({ children }: { children: ReactNode }) => children,
-}));
 
 jest.mock('react-native-reanimated', () => {
   const { View } = require('react-native');

@@ -1,14 +1,23 @@
-import React from 'react';
-import { View, StyleSheet, useWindowDimensions } from 'react-native';
+import { Ref } from 'react';
+import {
+  ScrollView,
+  View,
+  StyleSheet,
+  useWindowDimensions,
+  type ScrollViewInstance,
+} from 'react-native';
 import { TextInput } from 'react-native-paper';
-import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import defaultTo from 'lodash-es/defaultTo';
 import { useTheme, useChapterGeneralSettings } from '@hooks/persisted';
 import { getString } from '@i18n/translations';
 import { List, Button } from '@components/index';
 import SettingSwitch from '../../components/SettingSwitch';
 
-const NavigationTab: React.FC = () => {
+interface NavigationTabProps {
+  scrollRef?: Ref<ScrollViewInstance>;
+}
+
+const NavigationTab = ({ scrollRef }: NavigationTabProps) => {
   const theme = useTheme();
   const {
     useVolumeButtons = false,
@@ -18,6 +27,7 @@ const NavigationTab: React.FC = () => {
     pageReader = false,
     pageReaderInvertVolumeButtons = false,
     pageReaderDisableAnimation = false,
+    infiniteScroll = false,
     autoScroll = false,
     autoScrollInterval = 10,
     autoScrollOffset = null,
@@ -31,7 +41,8 @@ const NavigationTab: React.FC = () => {
     autoScrollInterval === 10 && autoScrollOffset === null;
 
   return (
-    <BottomSheetScrollView
+    <ScrollView
+      ref={scrollRef}
       style={styles.container}
       showsVerticalScrollIndicator={false}
       contentContainerStyle={styles.contentContainer}
@@ -108,6 +119,19 @@ const NavigationTab: React.FC = () => {
           }
           theme={theme}
         />
+        <SettingSwitch
+          label={getString('readerScreen.bottomSheet.disableReaderAnimations')}
+          description={getString(
+            'readerScreen.bottomSheet.disableReaderAnimationsDescription',
+          )}
+          value={pageReaderDisableAnimation}
+          onPress={() =>
+            setChapterGeneralSettings({
+              pageReaderDisableAnimation: !pageReaderDisableAnimation,
+            })
+          }
+          theme={theme}
+        />
       </View>
 
       <View style={styles.section}>
@@ -121,6 +145,19 @@ const NavigationTab: React.FC = () => {
           onPress={() => setChapterGeneralSettings({ pageReader: !pageReader })}
           theme={theme}
         />
+        {!pageReader && (
+          <SettingSwitch
+            label={getString('readerScreen.bottomSheet.infiniteScroll')}
+            description={getString(
+              'readerScreen.bottomSheet.infiniteScrollDescription',
+            )}
+            value={infiniteScroll}
+            onPress={() =>
+              setChapterGeneralSettings({ infiniteScroll: !infiniteScroll })
+            }
+            theme={theme}
+          />
+        )}
         {pageReader && (
           <>
             <SettingSwitch
@@ -132,21 +169,6 @@ const NavigationTab: React.FC = () => {
               onPress={() =>
                 setChapterGeneralSettings({
                   pageReaderInvertVolumeButtons: !pageReaderInvertVolumeButtons,
-                })
-              }
-              theme={theme}
-            />
-            <SettingSwitch
-              label={getString(
-                'readerScreen.bottomSheet.disablePageTransitions',
-              )}
-              description={getString(
-                'readerScreen.bottomSheet.disablePageTransitionsDescription',
-              )}
-              value={pageReaderDisableAnimation}
-              onPress={() =>
-                setChapterGeneralSettings({
-                  pageReaderDisableAnimation: !pageReaderDisableAnimation,
                 })
               }
               theme={theme}
@@ -224,7 +246,7 @@ const NavigationTab: React.FC = () => {
       </View>
 
       <View style={styles.bottomSpacing} />
-    </BottomSheetScrollView>
+    </ScrollView>
   );
 };
 

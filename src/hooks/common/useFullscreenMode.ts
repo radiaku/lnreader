@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { RefObject, useCallback, useEffect } from 'react';
 import { StatusBar } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import {
@@ -8,12 +8,13 @@ import {
 } from '../persisted';
 import Color from 'color';
 import {
-  setNavigationBarTransparent,
-  setStatusBarColor,
+  setNavigationBarStyle,
+  setStatusBarStyle,
 } from '@theme/utils/setBarColor';
-import { SystemBars } from 'react-native-edge-to-edge';
+import { NavigationBar } from 'expo-navigation-bar';
 
-const useFullscreenMode = () => {
+/** `chromeHiddenRef`: whether the reader controls are hidden. */
+const useFullscreenMode = (chromeHiddenRef: RefObject<boolean>) => {
   const { addListener } = useNavigation();
   const { theme: backgroundColor } = useChapterReaderSettings();
   const { fullScreenMode } = useChapterGeneralSettings();
@@ -22,16 +23,16 @@ const useFullscreenMode = () => {
   const setImmersiveMode = useCallback(() => {
     if (fullScreenMode) {
       StatusBar.setHidden(true);
-      SystemBars.setHidden(true);
+      NavigationBar.setHidden(true);
     } else {
-      setStatusBarColor(Color(backgroundColor));
-      setNavigationBarTransparent(Color(backgroundColor).isDark());
+      setStatusBarStyle(Color(backgroundColor));
+      setNavigationBarStyle(Color(backgroundColor).isDark());
     }
   }, [backgroundColor, fullScreenMode]);
 
   const showStatusAndNavBar = useCallback(() => {
     StatusBar.setHidden(false);
-    SystemBars.setHidden(false);
+    NavigationBar.setHidden(false);
 
     if (fullScreenMode) {
       /**
@@ -39,8 +40,8 @@ const useFullscreenMode = () => {
        * But in hexa, ##xxxxxx00 could be another color
        */
 
-      setStatusBarColor(theme);
-      setNavigationBarTransparent(theme.isDark);
+      setStatusBarStyle(theme);
+      setNavigationBarStyle(theme.isDark);
     }
   }, [fullScreenMode, theme]);
 
@@ -48,20 +49,43 @@ const useFullscreenMode = () => {
     setImmersiveMode();
     return () => {
       StatusBar.setHidden(false);
-      SystemBars.setHidden(false);
+      NavigationBar.setHidden(false);
     };
   }, [setImmersiveMode]);
 
   useEffect(() => {
-    const unsubscribe = addListener('beforeRemove', () => {
+    const showAppBars = () => {
       StatusBar.setHidden(false);
-      SystemBars.setHidden(false);
-      setStatusBarColor(theme);
-      setNavigationBarTransparent(theme.isDark);
-    });
+      NavigationBar.setHidden(false);
+      setStatusBarStyle(theme);
+      setNavigationBarStyle(theme.isDark);
+    };
+    // A screen pushed over the reader (a linked novel) does not remove it, so
+    // the bars must follow focus as well as removal.
+    const unsubscribers = [
+      addListener('beforeRemove', showAppBars),
+      addListener('blur', showAppBars),
+      addListener('focus', () => {
+        const chromeHidden = chromeHiddenRef.current;
+        // Without fullScreenMode this only recolours the bars.
+        if (chromeHidden || !fullScreenMode) {
+          setImmersiveMode();
+        }
+        if (!chromeHidden) {
+          showStatusAndNavBar();
+        }
+      }),
+    ];
 
-    return unsubscribe;
-  }, [addListener, theme]);
+    return () => unsubscribers.forEach(unsubscribe => unsubscribe());
+  }, [
+    addListener,
+    chromeHiddenRef,
+    fullScreenMode,
+    setImmersiveMode,
+    showStatusAndNavBar,
+    theme,
+  ]);
 
   return { setImmersiveMode, showStatusAndNavBar };
 };

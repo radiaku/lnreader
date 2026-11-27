@@ -18,6 +18,8 @@ const baseModuleNameMapper = {
   '^@specs/(.*)$': '<rootDir>/specs/$1',
   '^@modules/nitro-epub$': '<rootDir>/modules/nitro-epub/src/index',
   '^@modules/nitro-tts$': '<rootDir>/modules/nitro-tts/src/index',
+  '^@modules/nitro-chapter-list$':
+    '<rootDir>/modules/nitro-chapter-list/src/index',
   '^@modules/(.*)$': '<rootDir>/modules/$1',
   '^@test-utils$': '<rootDir>/test/test-utils',
   '^@env$': '<rootDir>/src/generated/build-info',
@@ -31,7 +33,7 @@ const baseTransform = {
 
 const baseTransformIgnorePatterns = [
   // 'node_modules/(?!(.pnpm/|@op-engineering|drizzle-orm|lodash-es|@babel/runtime))',
-  'node_modules/(?!(?:.pnpm/)?((jest-)?react-native|@react-native(-community)?|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|@material/material-color-utilities|@pchmn/expo-material3-theme|react-navigation|@react-navigation/.*|@sentry/react-native|native-base|react-native-svg|color|@op-engineering|drizzle-orm|lodash-es))',
+  'node_modules/(?!(?:.pnpm/)?((jest-)?react-native|@react-native(-community)?|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|@material/material-color-utilities|@pchmn/expo-material3-theme|react-navigation|@react-navigation/.*|@sentry/react-native|native-base|react-native-svg|color|@op-engineering|drizzle-orm|lodash-es|@lodev09/react-native-true-sheet))',
 ];
 
 module.exports = {
@@ -41,8 +43,9 @@ module.exports = {
     {
       displayName: 'db',
       testEnvironment: 'node',
-      roots: ['<rootDir>/src/database'],
-      testMatch: ['**/__tests__/**/*.test.ts'],
+      // Include shared source dependencies when selecting related tests.
+      roots: ['<rootDir>/src'],
+      testMatch: ['<rootDir>/src/database/**/__tests__/**/*.test.ts'],
       moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
       transform: baseTransform,
       transformIgnorePatterns: baseTransformIgnorePatterns,

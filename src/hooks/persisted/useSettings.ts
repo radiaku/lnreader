@@ -1,14 +1,17 @@
 import { ChapterOrderKey } from '@database/constants';
 import {
   DisplayModes,
-  LibraryFilter,
+  LegacyLibraryFilter,
+  LibraryFilters,
   LibrarySortOrder,
+  resolveLibraryFilters,
 } from '@screens/library/constants/constants';
 import { TtsEngine, TtsVoice } from '@modules/nitro-tts';
 import { useMMKVObject } from 'react-native-mmkv';
 import { useEffect, useMemo } from 'react';
 import { getMMKVObject } from '@utils/mmkv/mmkv';
 import type { DateFormat } from '@utils/dateFormat';
+import type { BackupOptions } from '@services/backup/options';
 import type {
   AutomaticBackupInterval,
   AutomaticLibraryUpdateInterval,
@@ -56,6 +59,20 @@ export interface AppSettings {
   showLabelsInNav: boolean;
   useFabForContinueReading: boolean;
   disableLoadingAnimations: boolean;
+  reduceAppAnimations: boolean;
+  ePaperOptimizations: boolean;
+  ePaperPreviousSettings?: {
+    disableLoadingAnimations: boolean;
+    reduceAppAnimations: boolean;
+    readerTheme: ReaderTheme;
+    readerGeneral: Pick<
+      ChapterGeneralSettings,
+      | 'pageReader'
+      | 'useVolumeButtons'
+      | 'pageReaderDisableAnimation'
+      | 'autoScroll'
+    >;
+  };
   dateFormat?: DateFormat;
   relativeTimestamps?: boolean;
 
@@ -73,10 +90,12 @@ export interface AppSettings {
   smartUpdateSkipCompleted: boolean;
   smartUpdateSkipUnstarted: boolean;
   smartUpdateSkipWithUnread: boolean;
+  smartUpdateSkipNotDue: boolean;
   automaticLibraryUpdateIntervalHours: AutomaticLibraryUpdateInterval;
   automaticBackupIntervalHours?: AutomaticBackupInterval;
   automaticBackupDirectoryUri?: string;
   automaticBackupDirectoryName?: string;
+  automaticBackupOptions?: BackupOptions;
   lastAutomaticBackupAt?: number;
   updateLibraryOnLaunch: boolean;
   downloadNewChapters: boolean;
@@ -120,8 +139,15 @@ export interface LibrarySettings {
   lastUsedCategoryId?: number;
   globalUpdateExcludeCategoryIds?: number[];
   globalUpdateIncludeCategoryIds?: number[];
+  upcomingExcludeCategoryIds?: number[];
+  upcomingIncludeCategoryIds?: number[];
   sortOrder?: LibrarySortOrder;
-  filter?: LibraryFilter;
+  /** @deprecated Read through `filters`, which falls back to it. */
+  filter?: LegacyLibraryFilter;
+  filters?: LibraryFilters;
+  /** Genre keys; see `getGenreKey`. */
+  includedGenres?: string[];
+  excludedGenres?: string[];
   showDownloadBadges?: boolean;
   showUnreadBadges?: boolean;
   showContinueReadingButton?: boolean;
@@ -196,6 +222,7 @@ export interface ChapterGeneralSettings {
   TTSEnable: boolean;
   pageReaderInvertVolumeButtons: boolean;
   pageReaderDisableAnimation: boolean;
+  infiniteScroll: boolean;
 }
 
 export interface ReaderTheme {
@@ -261,6 +288,8 @@ const initialAppSettings: AppSettings = {
   showLabelsInNav: true,
   useFabForContinueReading: false,
   disableLoadingAnimations: false,
+  reduceAppAnimations: false,
+  ePaperOptimizations: false,
   dateFormat: 'default',
   relativeTimestamps: true,
 
@@ -278,6 +307,7 @@ const initialAppSettings: AppSettings = {
   smartUpdateSkipCompleted: false,
   smartUpdateSkipUnstarted: false,
   smartUpdateSkipWithUnread: false,
+  smartUpdateSkipNotDue: false,
   automaticLibraryUpdateIntervalHours: 0,
   automaticBackupIntervalHours: 0,
   updateLibraryOnLaunch: false,
@@ -323,6 +353,7 @@ export const initialChapterGeneralSettings: ChapterGeneralSettings = {
   TTSEnable: true,
   pageReaderInvertVolumeButtons: false,
   pageReaderDisableAnimation: false,
+  infiniteScroll: false,
 };
 
 export const initialChapterReaderSettings: ChapterReaderSettings = {
@@ -361,7 +392,10 @@ export const useAppSettings = () => {
     useMMKVObject<AppSettings>(APP_SETTINGS);
 
   const setAppSettings = (values: Partial<AppSettings>) =>
-    setSettings({ ...appSettings, ...values });
+    setSettings(currentSettings => ({
+      ...(currentSettings ?? initialAppSettings),
+      ...values,
+    }));
 
   return {
     ...appSettings,
@@ -395,6 +429,11 @@ const defaultLibrarySettings: LibrarySettings = {
   sortOrder: LibrarySortOrder.DateAdded_DESC,
 };
 
+const useValueMemo = <T>(value: T): T => {
+  const serialized = JSON.stringify(value);
+  return useMemo(() => JSON.parse(serialized) as T, [serialized]);
+};
+
 export const useLibrarySettings = () => {
   const [librarySettings, setSettings] =
     useMMKVObject<LibrarySettings>(LIBRARY_SETTINGS);
@@ -402,8 +441,17 @@ export const useLibrarySettings = () => {
   const setLibrarySettings = (value: Partial<LibrarySettings>) =>
     setSettings({ ...librarySettings, ...value });
 
+  const filters = useValueMemo(
+    resolveLibraryFilters(librarySettings?.filters, librarySettings?.filter),
+  );
+  const includedGenres = useValueMemo(librarySettings?.includedGenres ?? []);
+  const excludedGenres = useValueMemo(librarySettings?.excludedGenres ?? []);
+
   return {
     ...{ ...defaultLibrarySettings, ...librarySettings },
+    filters,
+    includedGenres,
+    excludedGenres,
     setLibrarySettings,
   };
 };

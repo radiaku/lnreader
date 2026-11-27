@@ -7,9 +7,11 @@ import {
   insertTestCategory,
 } from './testData';
 import {
+  getLibraryNovelKeysFromDb,
   getLibraryNovelsFromDb,
   getLibraryNovelsForGlobalUpdate,
   getLibraryWithCategory,
+  getUpcomingNovelsQuery,
 } from '../LibraryQueries';
 import { TestDb } from './testDb';
 import { setupTestDatabase, teardownTestDatabase } from './setup';
@@ -86,24 +88,138 @@ describe('LibraryQueries', () => {
       expect(novel[0].lastUpdatedAt).toBe('2026-07-28 10:00:00');
     });
 
-    it('should filter novels by raw SQL filter', async () => {
+    it('should include only novels matching an included filter', async () => {
       await insertTestNovel(testDb, {
         inLibrary: true,
         name: 'Novel A',
-        author: 'Author One',
+        status: 'Completed',
       });
       await insertTestNovel(testDb, {
         inLibrary: true,
         name: 'Novel B',
-        author: 'Author Two',
+        status: 'Ongoing',
       });
+
+      const novels = await getLibraryNovelsFromDb(undefined, {
+        completed: 'include',
+      });
+      expect(novels.map(n => n.name)).toEqual(['Novel A']);
+    });
+
+    it('should leave out novels matching an excluded filter', async () => {
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Completed',
+        status: 'Completed',
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Ongoing',
+        status: 'Ongoing',
+      });
+      // NULL fails `status LIKE 'Completed'`, so it is not completed.
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'No status',
+        status: null,
+      });
+
+      const novels = await getLibraryNovelsFromDb('name ASC', {
+        completed: 'exclude',
+      });
+      expect(novels.map(n => n.name)).toEqual(['No status', 'Ongoing']);
+    });
+
+    it.each([
+      ['downloaded', ['Downloaded', 'Local'], ['Not downloaded']],
+      ['unread', ['Not downloaded'], ['Downloaded', 'Local']],
+      ['started', ['Downloaded', 'Local'], ['Not downloaded']],
+      ['customUpdateFrequency', ['Local'], ['Downloaded', 'Not downloaded']],
+    ] as const)(
+      'should split the library by the %s filter',
+      async (key, included, excluded) => {
+        const downloadedId = await insertTestNovel(testDb, {
+          inLibrary: true,
+          name: 'Downloaded',
+          lastReadAt: '2026-01-01 00:00:00',
+        });
+        await insertTestChapter(testDb, downloadedId, { isDownloaded: true });
+        await insertTestNovel(testDb, {
+          inLibrary: true,
+          name: 'Local',
+          isLocal: true,
+          lastReadAt: '2026-01-01 00:00:00',
+          fetchInterval: -1,
+        });
+        await insertTestNovel(testDb, {
+          inLibrary: true,
+          name: 'Not downloaded',
+          fetchInterval: null,
+        });
+
+        const includedNovels = await getLibraryNovelsFromDb('name ASC', {
+          [key]: 'include',
+        });
+        const excludedNovels = await getLibraryNovelsFromDb('name ASC', {
+          [key]: 'exclude',
+        });
+
+        expect(includedNovels.map(n => n.name)).toEqual(included);
+        expect(excludedNovels.map(n => n.name)).toEqual(excluded);
+      },
+    );
+
+    it('should combine several filters with AND', async () => {
+      const readId = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Downloaded, started, ongoing',
+        status: 'Ongoing',
+        lastReadAt: '2026-01-01 00:00:00',
+      });
+      await insertTestChapter(testDb, readId, { isDownloaded: true });
+      const completedId = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Downloaded, started, completed',
+        status: 'Completed',
+        lastReadAt: '2026-01-01 00:00:00',
+      });
+      await insertTestChapter(testDb, completedId, { isDownloaded: true });
+      const unreadId = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Downloaded, unread, ongoing',
+        status: 'Ongoing',
+      });
+      await insertTestChapter(testDb, unreadId, { isDownloaded: true });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Not downloaded, started, ongoing',
+        status: 'Ongoing',
+        lastReadAt: '2026-01-01 00:00:00',
+      });
+
+      const novels = await getLibraryNovelsFromDb(undefined, {
+        downloaded: 'include',
+        started: 'include',
+        completed: 'exclude',
+      });
+      expect(novels.map(n => n.name)).toEqual(['Downloaded, started, ongoing']);
+    });
+
+    it('should ignore an excluded Downloaded filter in downloaded-only mode', async () => {
+      const downloadedId = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Downloaded',
+      });
+      await insertTestChapter(testDb, downloadedId, { isDownloaded: true });
+      await insertTestNovel(testDb, { inLibrary: true, name: 'Remote' });
 
       const novels = await getLibraryNovelsFromDb(
         undefined,
-        "author = 'Author One'",
+        { downloaded: 'exclude' },
+        undefined,
+        true,
       );
-      expect(novels).toHaveLength(1);
-      expect(novels[0].name).toBe('Novel A');
+      expect(novels.map(n => n.name)).toEqual(['Downloaded']);
     });
 
     it('should filter by search text', async () => {
@@ -237,17 +353,19 @@ describe('LibraryQueries', () => {
         isLocal: false,
       });
 
-      // Novel 3: Downloaded but not matching author filter
-      await insertTestNovel(testDb, {
+      // Novel 3: Downloaded but completed, which the filters exclude
+      const completedNovelId = await insertTestNovel(testDb, {
         inLibrary: true,
-        name: 'Downloaded Book',
+        name: 'Remote Completed Book',
         author: 'Author One',
+        status: 'Completed',
         isLocal: false,
-      }); // No chapters, so chaptersDownloaded is 0
+      });
+      await insertTestChapter(testDb, completedNovelId, { isDownloaded: true });
 
       const novels1 = await getLibraryNovelsFromDb(
         'name ASC', // sortOrder
-        "author = 'Author Two'", // filter
+        { completed: 'exclude' }, // filters
         'Remote', // searchText
         true, // downloadedOnlyMode
         true, // excludeLocalNovels
@@ -274,13 +392,13 @@ describe('LibraryQueries', () => {
 
       const novels2 = await getLibraryNovelsFromDb(
         'name DESC',
-        "author = 'Author One'",
+        { unread: 'include' },
         'Local',
         true,
         false, // Include local novels
       );
 
-      // Both are local, by Author One, and have downloaded chapters.
+      // Both are local, unread, and have downloaded chapters.
       // Sorted DESC, so 'The Great Local Novel' comes first.
       expect(novels2.map(n => n.name)).toEqual([
         'The Great Local Novel',
@@ -290,7 +408,7 @@ describe('LibraryQueries', () => {
       // Test Case 3: Combination leading to empty results
       const novels3 = await getLibraryNovelsFromDb(
         'name ASC',
-        "author = 'NonExistent'",
+        { started: 'include' },
         'Novel',
         false,
         false,
@@ -301,10 +419,9 @@ describe('LibraryQueries', () => {
     it('should return empty array if no novels match filters', async () => {
       await insertTestNovel(testDb, { inLibrary: true, name: 'Novel A' });
 
-      const novels = await getLibraryNovelsFromDb(
-        undefined,
-        "author = 'NonExistent'",
-      );
+      const novels = await getLibraryNovelsFromDb(undefined, {
+        completed: 'include',
+      });
       expect(novels).toHaveLength(0);
     });
 
@@ -313,6 +430,34 @@ describe('LibraryQueries', () => {
 
       const novels = await getLibraryNovelsFromDb();
       expect(novels).toHaveLength(0);
+    });
+  });
+
+  describe('getLibraryNovelKeysFromDb', () => {
+    it('should identify every saved novel and no other', async () => {
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        pluginId: 'a',
+        path: '/completed',
+        status: 'Completed',
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        pluginId: 'b',
+        path: '/ongoing',
+        status: 'Ongoing',
+      });
+      await insertTestNovel(testDb, { inLibrary: false, path: '/cached' });
+
+      const keys = await getLibraryNovelKeysFromDb();
+
+      expect(keys).toHaveLength(2);
+      expect(keys).toEqual(
+        expect.arrayContaining([
+          { pluginId: 'a', path: '/completed' },
+          { pluginId: 'b', path: '/ongoing' },
+        ]),
+      );
     });
   });
 
@@ -680,6 +825,101 @@ describe('LibraryQueries', () => {
       const novels = await getLibraryWithCategory(undefined);
       expect(novels).toHaveLength(2);
       expect(novels.map(n => n.name).sort()).toEqual(['Novel 1', 'Novel 2']);
+    });
+  });
+
+  describe('getUpcomingNovelsQuery', () => {
+    const startOfToday = '2026-11-22T00:00:00.000Z';
+    const noFilter = { includedCategoryIds: [], excludedCategoryIds: [] };
+
+    it('lists library novels predicted from today on, soonest first', async () => {
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Next week',
+        nextUpdate: '2026-11-29T00:00:00.000Z',
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Today',
+        nextUpdate: startOfToday,
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Overdue',
+        nextUpdate: '2026-11-20T00:00:00.000Z',
+      });
+      await insertTestNovel(testDb, { inLibrary: true, name: 'Unpredicted' });
+      await insertTestNovel(testDb, {
+        inLibrary: false,
+        name: 'Not in library',
+        nextUpdate: startOfToday,
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        isLocal: true,
+        name: 'Local',
+        nextUpdate: startOfToday,
+      });
+
+      const novels = await getUpcomingNovelsQuery(noFilter, startOfToday).all();
+
+      expect(novels.map(novel => novel.name)).toEqual(['Today', 'Next week']);
+    });
+
+    it('hides novels whose status means they will not release again', async () => {
+      for (const status of [
+        'Ongoing',
+        'Unknown',
+        'Publishing Finished',
+        'Completed',
+        'Cancelled',
+        'On Hiatus',
+      ]) {
+        await insertTestNovel(testDb, {
+          inLibrary: true,
+          name: status,
+          status,
+          nextUpdate: startOfToday,
+        });
+      }
+
+      const novels = await getUpcomingNovelsQuery(noFilter, startOfToday).all();
+
+      expect(novels.map(novel => novel.name).sort()).toEqual([
+        'Ongoing',
+        'Publishing Finished',
+        'Unknown',
+      ]);
+    });
+
+    it('applies included categories and lets exclusions win', async () => {
+      const both = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Both',
+        nextUpdate: startOfToday,
+      });
+      const included = await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Included',
+        nextUpdate: startOfToday,
+      });
+      await insertTestNovel(testDb, {
+        inLibrary: true,
+        name: 'Uncategorized',
+        nextUpdate: startOfToday,
+      });
+      const reading = await insertTestCategory(testDb, { name: 'Reading' });
+      const dropped = await insertTestCategory(testDb, { name: 'Dropped' });
+      await insertTestNovelCategory(testDb, both, reading);
+      await insertTestNovelCategory(testDb, both, dropped);
+      await insertTestNovelCategory(testDb, included, reading);
+
+      const novels = await getUpcomingNovelsQuery(
+        { includedCategoryIds: [reading], excludedCategoryIds: [dropped] },
+        startOfToday,
+      ).all();
+
+      expect(novels.map(novel => novel.name)).toEqual(['Included']);
     });
   });
 });

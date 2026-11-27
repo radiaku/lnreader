@@ -5,28 +5,24 @@ import ReaderAppbar from './components/ReaderAppbar';
 import ReaderFooter from './components/ReaderFooter';
 
 import WebViewReader from './components/WebViewReader';
+import { buildReaderChromeScript } from './utils/buildReaderChromeScript';
 import ReaderBottomSheetV2 from './components/ReaderBottomSheet/ReaderBottomSheet';
 import ChapterDrawer from './components/ChapterDrawer';
 import ChapterLoadingScreen from './ChapterLoadingScreen/ChapterLoadingScreen';
 import { ErrorScreenV2 } from '@components';
 import { ChapterScreenProps } from '@navigators/types';
 import { getString } from '@i18n/translations';
+import { runWhenIdle } from '@utils/runWhenIdle';
 import KeepScreenAwake from './components/KeepScreenAwake';
 import {
   ChapterContextProvider,
   useChapterContext,
   useReaderChromeHidden,
 } from './ChapterContext';
-import { BottomSheetModalMethods } from '@gorhom/bottom-sheet/lib/typescript/types';
+import { BottomSheetRef } from '@components/BottomSheet/BottomSheet';
 import { useBackHandler } from '@hooks/index';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import {
-  InteractionManager,
-  Keyboard,
-  Share,
-  StyleSheet,
-  View,
-} from 'react-native';
+import { Keyboard, Share, StyleSheet, View } from 'react-native';
 import { Drawer } from 'react-native-drawer-layout';
 import { EMPTY_READER_SEARCH_RESULT, ReaderSearchResult } from './types';
 import * as Linking from 'expo-linking';
@@ -60,10 +56,7 @@ const ReaderDrawerLayout = ({ route, navigation }: ChapterScreenProps) => {
     if (loading || drawerMounted) {
       return;
     }
-    const handle = InteractionManager.runAfterInteractions(() =>
-      setDrawerMounted(true),
-    );
-    return () => handle.cancel();
+    return runWhenIdle(() => setDrawerMounted(true));
   }, [drawerMounted, loading]);
 
   useBackHandler(() => {
@@ -130,17 +123,22 @@ export const ChapterContent = ({
     loading,
     error,
     webViewRef,
+    hiddenRef,
     hideHeader,
     refetch,
   } = useChapterContext();
   const hidden = useReaderChromeHidden();
-  const readerSheetRef = useRef<BottomSheetModalMethods>(null);
+  const readerSheetRef = useRef<BottomSheetRef>(null);
   const theme = useTheme();
   const { pageReader = false, keepScreenOn } = useChapterGeneralSettings();
   const [bookmarked, setBookmarked] = useState<boolean>(
     chapter.bookmark ?? false,
   );
   const [searchVisible, setSearchVisible] = useState(false);
+  const searchVisibleRef = useRef(searchVisible);
+  useEffect(() => {
+    searchVisibleRef.current = searchVisible;
+  }, [searchVisible]);
   const [searchResult, setSearchResult] = useState<ReaderSearchResult>(
     EMPTY_READER_SEARCH_RESULT,
   );
@@ -217,12 +215,9 @@ export const ChapterContent = ({
       return;
     }
 
-    webViewRef.current?.injectJavaScript(`
-      if (window.reader?.hidden) {
-        window.reader.hidden.val = ${searchVisible ? 'true' : 'false'};
-      }
-      true;
-    `);
+    webViewRef.current?.injectJavaScript(
+      buildReaderChromeScript(false, searchVisible),
+    );
   }, [hidden, searchVisible, webViewRef]);
 
   const scrollToStart = useCallback(() => {
@@ -231,7 +226,7 @@ export const ChapterContent = ({
       webViewRef?.current?.injectJavaScript(
         !pageReader
           ? `(()=>{
-                window.scrollTo({top:0,behavior:'smooth'})
+                window.scrollTo({top:window.reader?.chapterTop ?? 0,behavior:window.reader?.scrollBehavior?.() ?? 'smooth'})
               })()`
           : `(()=>{
               window.pageReader?.movePage(0);
@@ -306,6 +301,8 @@ export const ChapterContent = ({
         <ChapterLoadingScreen />
       ) : (
         <WebViewReader
+          hiddenRef={hiddenRef}
+          searchVisibleRef={searchVisibleRef}
           onPress={handleReaderPress}
           onTouchStart={handleReaderTouchStart}
           onSearchResult={setSearchResult}
